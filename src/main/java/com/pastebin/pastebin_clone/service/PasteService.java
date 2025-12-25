@@ -1,87 +1,104 @@
 package com.pastebin.pastebin_clone.service;
 
+import com.pastebin.pastebin_clone.dto.PasteRequest;
+import com.pastebin.pastebin_clone.dto.PasteResponse;
 import com.pastebin.pastebin_clone.model.PasteMetadata;
-import com.pastebin.pastebin_clone.repository.PasteRepository;
-import com.pastebin.pastebin_clone.service.storage.ContentStore;
-import com.pastebin.pastebin_clone.util.UrlShortener;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import com.pastebin.pastebin_clone.repository.PasteMetadataRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.concurrent.TimeUnit;
 
 @Service
-@RequiredArgsConstructor
-@Slf4j
 public class PasteService {
 
-    private final PasteRepository repository;
-    private final ContentStore contentStore;
-    private final UrlShortener urlShortener;
-    private final StringRedisTemplate redisTemplate;
+    @Autowired
+    private PasteMetadataRepository metadataRepository;
 
-    // WRITE PATH
-    public PasteMetadata createPaste(String content, Integer expirationMinutes, String ipAddress) {
-        
-        // 1. Generate Link
-        String shortLink = urlShortener.generateShortLink(ipAddress);
-        while (repository.existsById(shortLink)) {
-            shortLink = urlShortener.generateShortLink(ipAddress + System.nanoTime());
+    @Autowired
+    private DatabaseContentStore contentStore;
+
+    @Autowired
+    private UrlShortenerService urlShortener;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    // This reads the URL from application.properties
+    // If you are on localhost, it uses localhost.
+    // If you are in production, you can change this without changing code!
+    @Value("${app.base-url:http://localhost:8080/api/v1/paste/}")
+    private String baseUrl;
+
+    /**
+     * WRITE PATH: Creates a new paste
+     * 1. Generates Short Key
+     * 2. Saves heavy content to Blob Store (Content Table)
+     * 3. Saves metadata (with expiration) to SQL
+     * 4. Returns the full URL
+     */
+    @Transactional
+    public PasteResponse createPaste(PasteRequest request) {
+        String shortKey = urlShortener.generateShortKey();
+
+        // 1. Save the Content (The heavy text)
+        String contentId = contentStore.saveContent(request.getContent());
+
+        // 2. Create Metadata (The details)
+        PasteMetadata metadata = new PasteMetadata();
+        metadata.setUrlKey(shortKey);
+        metadata.setCreatedAt(LocalDateTime.now());
+        metadata.setContentId(contentId);
+
+        // 3. Handle Expiration (if provided in JSON)
+        if (request.getExpirationMinutes() > 0) {
+            metadata.setExpirationTime(LocalDateTime.now().plusMinutes(request.getExpirationMinutes()));
         }
 
-        // 2. Save Content (S3)
-        String objectKey = contentStore.saveContent(content);
+        metadataRepository.save(metadata);
 
-        // 3. Save Metadata (SQL)
-        PasteMetadata metadata = new PasteMetadata();
-        metadata.setShortLink(shortLink);
-        metadata.setObjectKey(objectKey);
-        metadata.setCreatedAt(LocalDateTime.now());
-        metadata.setExpirationMinutes(expirationMinutes);
+        // 4. Construct Response
+        PasteResponse response = new PasteResponse();
+        response.setKey(shortKey);
+        response.setUrl(baseUrl + shortKey);
 
-        PasteMetadata saved = repository.save(metadata);
-        
-        log.info("WRITE_EVENT: paste_id={}", shortLink);
-        return saved;
+        return response;
     }
 
-    // READ PATH
-    public String getPasteContent(String shortLink) {
-        String cacheKey = "paste:" + shortLink;
-
-        // 1. Check Redis (Cache Hit)
-        String cachedContent = redisTemplate.opsForValue().get(cacheKey);
+    /**
+     * READ PATH: Retrieves a paste
+     * 1. Checks Redis Cache first (Fastest)
+     * 2. Checks SQL Database for Metadata
+     * 3. Checks if expired
+     * 4. Fetches content from Blob Store
+     * 5. Refills Cache
+     */
+    public String getPaste(String urlKey) {
+        // 1. Cache Hit?
+        String cachedContent = redisTemplate.opsForValue().get(urlKey);
         if (cachedContent != null) {
-            log.info("READ_EVENT: paste_id={} source=CACHE", shortLink);
             return cachedContent;
         }
 
-        // 2. Check Database (Cache Miss)
-        PasteMetadata metadata = repository.findById(shortLink)
+        // 2. Database Lookup
+        PasteMetadata metadata = metadataRepository.findByUrlKey(urlKey)
                 .orElseThrow(() -> new RuntimeException("Paste not found"));
 
-        if (metadata.isExpired()) {
-            throw new RuntimeException("Paste expired");
+        // 3. Expiration Check
+        if (metadata.getExpirationTime() != null && metadata.getExpirationTime().isBefore(LocalDateTime.now())) {
+            throw new RuntimeException("This paste has expired.");
         }
 
-        // 3. Fetch from S3
-        String content = contentStore.getContent(metadata.getObjectKey());
+        // 4. Content Fetch
+        String content = contentStore.getContent(metadata.getContentId());
 
-        // 4. Update Redis
-        long ttl = 24 * 60; // Default 24 hours
-        if (metadata.getExpirationMinutes() != null) {
-            long age = Duration.between(metadata.getCreatedAt(), LocalDateTime.now()).toMinutes();
-            ttl = metadata.getExpirationMinutes() - age;
-        }
-        
-        if (ttl > 0) {
-            redisTemplate.opsForValue().set(cacheKey, content, ttl, TimeUnit.MINUTES);
-        }
+        // 5. Cache Miss -> Set Cache (Expire cache in 10 minutes to save RAM)
+        redisTemplate.opsForValue().set(urlKey, content, 10, TimeUnit.MINUTES);
 
-        log.info("READ_EVENT: paste_id={} source=DB_S3", shortLink);
         return content;
     }
 }

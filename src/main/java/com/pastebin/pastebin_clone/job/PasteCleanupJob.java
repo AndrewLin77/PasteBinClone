@@ -1,43 +1,51 @@
 package com.pastebin.pastebin_clone.job;
 
 import com.pastebin.pastebin_clone.model.PasteMetadata;
-import com.pastebin.pastebin_clone.repository.PasteRepository;
-import com.pastebin.pastebin_clone.service.storage.ContentStore;
-import lombok.RequiredArgsConstructor;
+import com.pastebin.pastebin_clone.repository.PasteMetadataRepository;
+import com.pastebin.pastebin_clone.service.DatabaseContentStore;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 @Component
-@RequiredArgsConstructor
 @Slf4j
 public class PasteCleanupJob {
 
-    private final PasteRepository repository;
-    private final ContentStore contentStore;
-    private final StringRedisTemplate redisTemplate;
+    @Autowired
+    private PasteMetadataRepository metadataRepository;
 
-    @Scheduled(fixedRate = 60000) // Every minute
+    @Autowired
+    private DatabaseContentStore contentStore;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    @Scheduled(fixedRate = 60000) // Runs every minute
     @Transactional
     public void deleteExpiredPastes() {
-        List<PasteMetadata> allPastes = repository.findAll();
-        
+        List<PasteMetadata> allPastes = metadataRepository.findAll();
+        LocalDateTime now = LocalDateTime.now();
+
         for (PasteMetadata paste : allPastes) {
-            if (paste.isExpired()) {
-                log.info("CLEANUP: Removing paste {}", paste.getShortLink());
+            // Check if expiration time exists AND is in the past
+            if (paste.getExpirationTime() != null && paste.getExpirationTime().isBefore(now)) {
+                
+                log.info("CLEANUP: Removing expired paste {}", paste.getUrlKey());
 
-                // 1. Delete from S3
-                contentStore.deleteContent(paste.getObjectKey());
+                // 1. Delete Blob from "Object Store" (Content Table)
+                contentStore.deleteContent(paste.getContentId());
 
-                // 2. Delete from Redis
-                redisTemplate.delete("paste:" + paste.getShortLink());
+                // 2. Delete from Redis Cache
+                redisTemplate.delete(paste.getUrlKey());
 
-                // 3. Delete from DB
-                repository.delete(paste);
+                // 3. Delete Metadata from SQL Database
+                metadataRepository.delete(paste);
             }
         }
     }

@@ -1,37 +1,29 @@
 package com.pastebin.pastebin_clone.controller;
 
-import com.pastebin.pastebin_clone.model.PasteMetadata;
+import com.pastebin.pastebin_clone.dto.PasteRequest;
+import com.pastebin.pastebin_clone.dto.PasteResponse;
 import com.pastebin.pastebin_clone.service.PasteService;
-import jakarta.servlet.http.HttpServletRequest;
-import lombok.RequiredArgsConstructor;
-import org.springframework.http.ResponseEntity;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 @RestController
-@RequestMapping("/api/v1/paste")
-@RequiredArgsConstructor
+@RequestMapping("/api/v1/paste") // <--- Matches the HTML fetch()
+@CrossOrigin(origins = "*")        // <--- Allows browser access
 public class PasteController {
 
-    private final PasteService pasteService;
-
-    public record PasteRequest(String content, Integer expirationMinutes) {}
-    public record PasteResponse(String shortLink, String url) {}
+    @Autowired
+    private PasteService pasteService;
 
     @PostMapping
-    public ResponseEntity<PasteResponse> createPaste(@RequestBody PasteRequest request, HttpServletRequest servletRequest) {
-        String ip = servletRequest.getRemoteAddr();
-        PasteMetadata metadata = pasteService.createPaste(request.content(), request.expirationMinutes(), ip);
-        String fullUrl = "http://localhost:8080/api/v1/paste/" + metadata.getShortLink();
-        return ResponseEntity.ok(new PasteResponse(metadata.getShortLink(), fullUrl));
+    public PasteResponse createPaste(@RequestBody PasteRequest request) {
+        return pasteService.createPaste(request);
     }
 
-    @GetMapping("/{shortLink}")
-    public ResponseEntity<String> getPaste(@PathVariable String shortLink) {
-        try {
-            String content = pasteService.getPasteContent(shortLink);
-            return ResponseEntity.ok(content);
-        } catch (RuntimeException e) {
-            return ResponseEntity.notFound().build();
-        }
+    // Note: We handle the GET request on the same base URL structure
+    // If you want to view a paste, you might need to adjust the HTML or this mapping.
+    // For now, this handles the creation perfectly.
+    @GetMapping("/{urlKey}")
+    public String getPaste(@PathVariable String urlKey) {
+        return pasteService.getPaste(urlKey);
     }
 }
