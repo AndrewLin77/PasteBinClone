@@ -23,6 +23,11 @@
         }
         h1 { margin-top: 0; color: #333; }
         label { display: block; margin-bottom: 5px; font-weight: bold; color: #555; }
+        
+        /* Toggle Styling */
+        .mode-toggle { display: flex; gap: 15px; margin-bottom: 15px; }
+        .mode-toggle label { font-weight: normal; cursor: pointer; }
+        
         textarea {
             width: 100%;
             height: 150px;
@@ -31,8 +36,19 @@
             border-radius: 4px;
             font-family: monospace;
             resize: vertical;
-            box-sizing: border-box; /* Fixes padding issues */
+            box-sizing: border-box; 
         }
+        
+        /* File Input Styling */
+        #file-section {
+            border: 2px dashed #ddd;
+            padding: 20px;
+            text-align: center;
+            border-radius: 4px;
+            margin-bottom: 15px;
+            background: #fafafa;
+        }
+
         select {
             padding: 8px;
             border: 1px solid #ddd;
@@ -58,7 +74,7 @@
             padding: 15px;
             background-color: #e9ecef;
             border-radius: 4px;
-            display: none; /* Hidden by default */
+            display: none;
             text-align: center;
         }
         .result a {
@@ -69,6 +85,8 @@
         }
         .result a:hover { text-decoration: underline; }
         .error { color: red; margin-top: 10px; display: none; }
+        
+        .hidden { display: none; }
     </style>
 </head>
 <body>
@@ -76,8 +94,21 @@
 <div class="container">
     <h1>Create a New Paste</h1>
     
-    <label for="content">Paste Content:</label>
-    <textarea id="content" placeholder="Type your text here..."></textarea>
+    <div class="mode-toggle">
+        <label><input type="radio" name="mode" value="text" checked onclick="toggleMode()"> Text Paste</label>
+        <label><input type="radio" name="mode" value="image" onclick="toggleMode()"> Image Upload</label>
+    </div>
+
+    <div id="text-section">
+        <label for="content">Paste Content:</label>
+        <textarea id="content" placeholder="Type your text here..."></textarea>
+    </div>
+
+    <div id="file-section" class="hidden">
+        <label for="fileInput">Select an Image (Max 10MB):</label>
+        <input type="file" id="fileInput" accept="image/*">
+        <p id="fileStatus" style="font-size: 0.9em; color: #666; margin-top: 5px;"></p>
+    </div>
     
     <label for="expiration" style="margin-top: 15px;">Expiration:</label>
     <select id="expiration">
@@ -98,8 +129,35 @@
 </div>
 
 <script>
+    let currentBase64 = null; // Stores the converted image data
+
+    function toggleMode() {
+        const isText = document.querySelector('input[name="mode"]:checked').value === 'text';
+        document.getElementById('text-section').style.display = isText ? 'block' : 'none';
+        document.getElementById('file-section').style.display = isText ? 'none' : 'block';
+        document.getElementById('errorMsg').style.display = 'none';
+    }
+
+    // File Reader Logic
+    document.getElementById('fileInput').addEventListener('change', function() {
+        const file = this.files[0];
+        if (file) {
+            if (file.size > 10 * 1024 * 1024) { // 10MB check
+                alert("File is too large! Max 10MB.");
+                this.value = ""; 
+                return;
+            }
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                currentBase64 = e.target.result; // Save the long string
+                document.getElementById('fileStatus').innerText = `Ready to upload: ${file.name}`;
+            };
+            reader.readAsDataURL(file);
+        }
+    });
+
     async function createPaste() {
-        const content = document.getElementById('content').value;
+        const mode = document.querySelector('input[name="mode"]:checked').value;
         const expiration = document.getElementById('expiration').value;
         const btn = document.getElementById('createBtn');
         const errorMsg = document.getElementById('errorMsg');
@@ -112,42 +170,56 @@
         btn.disabled = true;
         btn.innerText = "Creating...";
 
-        if (!content.trim()) {
-            showError("Please enter some text.");
-            btn.disabled = false;
-            btn.innerText = "Create Paste";
-            return;
+        // Determine what content to send
+        let contentToSend = "";
+        
+        if (mode === 'text') {
+            contentToSend = document.getElementById('content').value;
+            if (!contentToSend.trim()) {
+                showError("Please enter some text.");
+                resetBtn();
+                return;
+            }
+        } else {
+            if (!currentBase64) {
+                showError("Please select an image file first.");
+                resetBtn();
+                return;
+            }
+            contentToSend = currentBase64;
         }
 
         try {
             const response = await fetch('/api/v1/paste', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    content: content,
+                    content: contentToSend,
                     expirationMinutes: parseInt(expiration)
                 })
             });
 
-            if (!response.ok) {
-                throw new Error("Server error: " + response.statusText);
-            }
+            if (!response.ok) throw new Error("Server error: " + response.statusText);
 
             const data = await response.json();
             
-            // Show Success
-            pasteLink.href = data.url;
-            pasteLink.innerText = data.url;
+            // Construct the VIEW URL
+            // If data.url comes back as the raw JSON url, we might want to point to view.html
+            // Assuming data.key is returned. If not, we extract it from data.url
+            let key = data.key || data.url.split("/").pop(); 
+            
+            // Generate link to our new view.html page
+            const viewLink = `${window.location.origin}/view.html?key=${key}`;
+            
+            pasteLink.href = viewLink;
+            pasteLink.innerText = viewLink;
             resultArea.style.display = 'block';
 
         } catch (err) {
-            showError("Failed to create paste. Is the server running?");
+            showError("Failed to create paste. " + err.message);
             console.error(err);
         } finally {
-            btn.disabled = false;
-            btn.innerText = "Create Paste";
+            resetBtn();
         }
     }
 
@@ -155,6 +227,12 @@
         const el = document.getElementById('errorMsg');
         el.innerText = msg;
         el.style.display = 'block';
+    }
+
+    function resetBtn() {
+        const btn = document.getElementById('createBtn');
+        btn.disabled = false;
+        btn.innerText = "Create Paste";
     }
 </script>
 
